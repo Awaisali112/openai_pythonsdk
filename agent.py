@@ -1,36 +1,63 @@
+"""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  agent.py — Complete OpenAI Agents SDK Reference (All Concepts)              ║
+║                                                                              ║
+║  Industry Problem: AI Customer Support Agent for a SaaS Company              ║
+║  - Classifies tickets (structured output)                                    ║
+║  - Looks up customer data (function tools)                                   ║
+║  - Checks system status (async tools)                                        ║
+║  - Generates responses (agent-as-tool)                                       ║
+║  - Runs locally via Ollama (zero cost)                                       ║
+║                                                                              ║
+║  Run: uv run agent.py                                                        ║
+║  Requires: uv add openai-agents openai ollama pydantic                       ║
+║  Requires: Ollama running with llama3.1:8b (ollama pull llama3.1:8b)         ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+"""
+
 import asyncio
-from datetime import datetime            #standard module
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
-from openai import AsyncOpenAI                      #third party module
-
-
+from openai import AsyncOpenAI
 from agents import (
     Agent,
-    OpenAIChatCompletionsModel,
     Runner,
     RunResult,
-    function_tool,
+    OpenAIChatCompletionsModel,
     ModelSettings,
-    )
-
-from agents.tracing import set_tracing_disabled
-set_tracing_disabled(True)
-
-def get_ollama_model():
-    client = AsyncOpenAI(
-    base_url="http://localhost:11434/v1", 
-    api_key="ollama"
-    )
-    local_model = OpenAIChatCompletionsModel(
-    model="qwen3.5:cloud",
-    openai_client=client,
+    function_tool,
 )
-    return local_model
+from agents.tracing import set_tracing_disabled
 
-MODEL = get_ollama_model()
 
+# ============================================================================
+# CONCEPT 1: LOCAL MODEL SETUP (Ollama)
+# ============================================================================
+# Why: Run agents locally for free, with full data privacy.
+# How: Point AsyncOpenAI client to Ollama's OpenAI-compatible endpoint.
+# Key: Disable tracing (it sends data to OpenAI by default).
+
+set_tracing_disabled(True)  # No telemetry to OpenAI
+
+ollama_client = AsyncOpenAI(
+    base_url="http://localhost:11434/v1",    # Ollama's endpoint
+    api_key="rizwan",                        # Dummy key (required by client)
+)
+
+local_model = OpenAIChatCompletionsModel(
+    model="llama3.1:8b",                     # Must match `ollama list`
+    openai_client=ollama_client,
+)
+
+
+# ============================================================================
+# CONCEPT 2: STRUCTURED OUTPUT (Pydantic Models)
+# ============================================================================
+# Why: Instead of parsing messy text, get clean typed data from the LLM.
+# How: Define a Pydantic model and set Agent(output_type=MyModel).
+# Key: The LLM is forced to return JSON matching your schema.
 
 class TicketClassification(BaseModel):
     """Structured output for ticket classification."""
@@ -47,6 +74,14 @@ class TicketClassification(BaseModel):
         description="One-line summary for the support dashboard"
     )
 
+
+# ============================================================================
+# CONCEPT 3: FUNCTION TOOLS (@function_tool)
+# ============================================================================
+# Why: Tools let agents take ACTIONS, not just generate text.
+# How: Decorate any Python function with @function_tool.
+# Key: Docstring becomes the tool description (LLM reads it to decide when to call).
+#      Type hints become the JSON schema (LLM uses them to format arguments).
 
 @function_tool
 def lookup_customer(email: str) -> str:
@@ -77,6 +112,7 @@ def lookup_customer(email: str) -> str:
         f"Customer since: {customer['since']}\n"
         f"Open tickets: {customer['tickets_open']}"
     )
+
 
 @function_tool
 def check_service_status(service: str) -> str:
@@ -131,6 +167,12 @@ def search_knowledge_base(query: str) -> str:
     return "No relevant articles found. Escalate to human agent."
 
 
+# ============================================================================
+# CONCEPT 4: DYNAMIC INSTRUCTIONS (Function-based)
+# ============================================================================
+# Why: Inject runtime context (time, user data, system state) into instructions.
+# How: Pass a function instead of a string to Agent(instructions=...).
+
 def support_instructions(context, agent):
     """Dynamic instructions that change based on current state."""
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -154,6 +196,15 @@ def support_instructions(context, agent):
     - For billing issues on Enterprise plans, always escalate (create a ticket).
     - Include ticket ID when creating tickets.
     """
+
+
+# ============================================================================
+# CONCEPT 5: SPECIALIST AGENT + AGENT-AS-TOOL
+# ============================================================================
+# Why: Complex tasks benefit from specialist agents working together.
+# How: Create a specialist agent, then use agent.as_tool() to let the
+#      orchestrator call it like a regular tool.
+
 classifier_agent = Agent(
     name="Ticket Classifier",
     instructions="""
@@ -167,14 +218,27 @@ classifier_agent = Agent(
     - P3-medium: Bug report, how-to question, feature request
     - P4-low: General feedback, suggestions
     """,
-    model=MODEL,
+    model=local_model,
+    output_type=TicketClassification,            # Forces structured JSON output
     model_settings=ModelSettings(temperature=0.1),  # Low temp = consistent results
 )
+
+
+# ============================================================================
+# CONCEPT 6: THE MAIN AGENT (Orchestrator)
+# ============================================================================
+# This is the primary agent that the user interacts with.
+# It has:
+# - Dynamic instructions (function-based)
+# - Multiple function tools
+# - A specialist agent-as-tool
+# - A specific model (local Ollama)
+# - Custom model settings
 
 support_agent = Agent(
     name="CloudSync Support",
     instructions=support_instructions,     # Dynamic (function, not string)
-    model=MODEL,                     # Runs locally via Ollama
+    model=local_model,                     # Runs locally via Ollama
     model_settings=ModelSettings(
         temperature=0.3,                   # Slightly creative but mostly focused
         max_tokens=1000,                   # Cap response length
@@ -193,6 +257,15 @@ support_agent = Agent(
     ],
 )
 
+
+# ============================================================================
+# CONCEPT 7: RUNNING THE AGENT
+# ============================================================================
+# Three ways to run:
+#   Runner.run()          — async, returns RunResult
+#   Runner.run_sync()     — sync wrapper (not in Jupyter/async contexts)
+#   Runner.run_streamed() — async streaming
+
 async def handle_customer(message: str) -> None:
     """Process a single customer message."""
     print(f"\n{'='*70}")
@@ -204,6 +277,13 @@ async def handle_customer(message: str) -> None:
     print(f"\nAgent Response:\n{result.final_output}")
     print(f"\nAgent: {result.last_agent.name}")
     print(f"Items generated: {len(result.new_items)}")
+
+
+# ============================================================================
+# CONCEPT 8: MULTI-TURN CONVERSATION
+# ============================================================================
+# Why: Real support conversations span multiple messages.
+# How: Use result.to_input_list() to carry history forward.
 
 async def interactive_session():
     """Run an interactive multi-turn support session."""
@@ -234,6 +314,11 @@ async def interactive_session():
         history = result.to_input_list()
 
         print(f"\nSupport: {result.final_output}")
+
+
+# ============================================================================
+# MAIN — Run demo scenarios
+# ============================================================================
 
 async def main():
     """Demonstrate the agent with realistic support scenarios."""
@@ -267,6 +352,10 @@ async def main():
         "returning errors for 2 hours. My production app is DOWN. Fix this NOW "
         "or I'm switching to a competitor!"
     )
+
+    # ── Uncomment for interactive mode ──
+    # await interactive_session()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
